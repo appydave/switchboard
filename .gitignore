@@ -13,6 +13,7 @@ build/
 
 # Runtime data (file-projected state)
 data/
+snapshots/
 
 # Logs
 *.log

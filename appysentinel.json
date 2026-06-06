@@ -9,12 +9,12 @@
     "version": "0.1.0"
   },
   "recipes": {
-    "input": [],
-    "storage": [],
-    "interface": [],
-    "transport": [],
+    "input": ["poll-command"],
+    "storage": ["snapshot-store"],
+    "interface": ["mcp-binding"],
+    "transport": ["sse-deliver"],
     "enrichment": [],
-    "runtime": [],
+    "runtime": ["register-as-launchd"],
     "coordination": []
   }
 }
