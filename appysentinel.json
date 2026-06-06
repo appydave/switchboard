@@ -1,0 +1,20 @@
+{
+  "name": "switchboard",
+  "machine": "{{MACHINE_NAME}}",
+  "version": "0.1.0",
+  "scaffoldVersion": "0.1.0",
+  "scaffoldCommit": null,
+  "core": {
+    "package": "@appydave/appysentinel-core",
+    "version": "0.1.0"
+  },
+  "recipes": {
+    "input": [],
+    "storage": [],
+    "interface": [],
+    "transport": [],
+    "enrichment": [],
+    "runtime": [],
+    "coordination": []
+  }
+}

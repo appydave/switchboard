@@ -1,0 +1,14 @@
+[Unit]
+Description=switchboard AppySentinel
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory={{PROJECT_DIR}}
+ExecStart={{BUN_PATH}} run {{PROJECT_DIR}}/src/main.ts
+Restart=always
+RestartSec=5
+Environment=HOME=%h
+
+[Install]
+WantedBy=default.target

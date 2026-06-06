@@ -1,0 +1,30 @@
+{
+  "name": "switchboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AppySentinel Sentinel — switchboard",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/main.ts",
+    "start": "bun src/main.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "echo 'template lint stub' && exit 0",
+    "prepare": "husky"
+  },
+  "dependencies": {
+    "@appydave/appysentinel-core": "^0.2.0"
+  },
+  "devDependencies": {
+    "@appydave/appysentinel-config": "^0.1.0",
+    "@types/node": "^22.10.0",
+    "husky": "^9.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.0.0"
+  },
+  "engines": {
+    "bun": ">=1.1.0",
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,1 @@
+// Wire collect recipes here.
