@@ -15,6 +15,7 @@ import { pollCommand } from './collect/poll-command.js';
 import { snapshotStore } from './storage/snapshot-store.js';
 import { sseDeliver } from './deliver/sse-deliver.js';
 import { apiBinding } from './access/bindings/api-binding.js';
+import { stalenessDetector } from './coordination/staleness-detector.js';
 
 const sentinel = createSentinel({
   name: 'switchboard',
@@ -53,6 +54,16 @@ sseDeliver(sentinel, {
 // from sse-deliver (override via INGEST_PORT); host-local by default.
 apiBinding(sentinel, {
   port: Number(process.env['INGEST_PORT'] ?? 5100),
+});
+
+// Coordination: staleness detector — the safety-net half of the reaper.
+// Observer-only: on a timer it scans tmux `swagger-*` windows whose underlying
+// claude process outlives STALE_MINUTES and EMITS a `session.stale` event. It
+// NEVER kills — acting on the Signal is an external reaper/operator's job. The
+// event rides sse-deliver; subscribe with `?subscribe=session.stale`.
+stalenessDetector(sentinel, {
+  intervalMs: Number(process.env['STALE_CHECK_MS'] ?? 30_000),
+  staleMinutes: Number(process.env['STALE_MINUTES'] ?? 10),
 });
 
 // Access (Query side): the MCP binding (src/access/bindings/mcp-binding.ts) is a

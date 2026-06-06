@@ -15,6 +15,6 @@
     "transport": ["sse-deliver"],
     "enrichment": [],
     "runtime": ["register-as-launchd"],
-    "coordination": []
+    "coordination": ["staleness-detector"]
   }
 }
