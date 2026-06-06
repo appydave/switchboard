@@ -14,10 +14,12 @@ build/
 # Runtime data (file-projected state)
 data/
 snapshots/
+queue/
 
 # Logs
 *.log
 npm-debug.log*
+logs/
 
 # OS / editor
 .DS_Store
