@@ -12,6 +12,19 @@
  * one open gap was durability (ephemeral SSE); this recipe closes it with an
  * append-only JSONL event log and `Last-Event-ID` replay.
  *
+ * DURABILITY IS TOPIC-SELECTIVE (see `durableTopic`). Only messages/alerts that
+ * need at-least-once delivery (job.*, session.*, alert.*) are written to the
+ * durable log, kept in the replay buffer, and replayed on reconnect. Ephemeral
+ * current-state TELEMETRY (e.g. process.snapshot — a ~140KB ps table every 15s)
+ * is still pushed LIVE to connected subscribers, but is NEVER persisted or
+ * replayed: it does not belong in a durable message/replay log, and persisting
+ * it bloated the log to 31MB/hour, unbounded. Snapshot-store remains the home
+ * for current state; this recipe only fans the bus outward.
+ *
+ * A pruning backstop (see `maxLogEntries`) caps the durable log so even durable
+ * events cannot grow unbounded — the log never needs to hold more than the
+ * replay buffer, which is the only window a client can ever replay from.
+ *
  * Endpoints (host-local by default):
  *   GET /sse?subscribe=a,b   open an event-stream; receive ONLY events whose
  *                            topic ∈ {a,b}. Empty/absent subscribe = firehose.
@@ -27,15 +40,20 @@
  * (observer-only posture — no unsolicited exposure).
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { URL } from 'node:url';
 import type { Sentinel, Signal } from '@appydave/appysentinel-core';
 
-/** One persisted event = one delivered Signal, tagged with a monotonic id + topic. */
+/** One delivered Signal as an SSE frame, tagged with topic (+ a monotonic id when durable). */
 export interface SseEvent {
-  /** Monotonic event id — the value a client echoes back as Last-Event-ID. */
-  id: number;
+  /**
+   * Monotonic event id — the value a client echoes back as Last-Event-ID.
+   * Present only for DURABLE events (those that go to the log + replay buffer).
+   * Ephemeral telemetry frames omit it so EventSource never advances
+   * Last-Event-ID past an id we will never replay.
+   */
+  id?: number;
   /** Topic this event was published under (server-side subscription key). */
   topic: string;
   /** The originating Signal's id (for de-dup / tracing). */
@@ -63,10 +81,29 @@ export interface SseDeliverOptions {
   /** Predicate selecting which Signals to deliver. Default: deliver all. */
   match?: (signal: Signal) => boolean;
   /**
+   * Predicate deciding whether a topic is DURABLE — i.e. needs at-least-once
+   * delivery: it is written to the durable log, held in the replay buffer, and
+   * replayed on reconnect. Topics for which this returns false are ephemeral
+   * TELEMETRY: pushed live to connected subscribers only, never persisted or
+   * replayed.
+   *
+   * Default: messages/alerts are durable (topic starts with `job.`, `session.`
+   * or `alert.`); everything else (e.g. `process.snapshot`) is ephemeral.
+   */
+  durableTopic?: (topic: string) => boolean;
+  /**
    * Max events held in memory for replay (and reloaded from the log tail on
    * start). Older events stay on disk but are not replayed. Default 1000.
    */
   replayBufferSize?: number;
+  /**
+   * Pruning backstop: hard cap on durable-log line count. When the log grows
+   * past this, it is rewritten to contain only the current replay buffer (the
+   * only events that could ever be replayed anyway), so the log cannot grow
+   * unbounded even for durable topics. Must be >= replayBufferSize or no replay
+   * data is lost on prune. Default 5000. Set 0 to disable pruning.
+   */
+  maxLogEntries?: number;
   /** Keep-alive comment ping interval in ms. Default 25_000. 0 disables. */
   heartbeatMs?: number;
 }
@@ -80,13 +117,26 @@ interface Subscriber {
   ping: () => void;
 }
 
-/** Format one event as an SSE frame. Multi-line data is split per spec. */
+/**
+ * Default durable-topic predicate: messages/alerts get at-least-once
+ * delivery; ephemeral telemetry does not. Match on topic prefix.
+ */
+function defaultDurableTopic(topic: string): boolean {
+  return topic.startsWith('job.') || topic.startsWith('session.') || topic.startsWith('alert.');
+}
+
+/**
+ * Format one event as an SSE frame. Multi-line data is split per spec. The
+ * `id:` line is emitted only for durable events (those carry an id); ephemeral
+ * frames omit it so clients never advance Last-Event-ID to a non-replayable id.
+ */
 function frameOf(event: SseEvent): string {
   const dataLines = event.data
     .split('\n')
     .map((line) => `data: ${line}`)
     .join('\n');
-  return `id: ${event.id}\nevent: ${event.topic}\n${dataLines}\n\n`;
+  const idLine = event.id !== undefined ? `id: ${event.id}\n` : '';
+  return `${idLine}event: ${event.topic}\n${dataLines}\n\n`;
 }
 
 /** Does an empty topic set mean firehose; else exact membership. */
@@ -100,13 +150,17 @@ export function sseDeliver(sentinel: Sentinel, options: SseDeliverOptions): void
   const logPath = resolve(options.logPath ?? 'snapshots/sse-eventlog.jsonl');
   const topicOf = options.topicOf ?? ((s: Signal) => s.name);
   const match = options.match ?? (() => true);
+  const durableTopic = options.durableTopic ?? defaultDurableTopic;
   const bufferSize = options.replayBufferSize ?? 1000;
+  const maxLogEntries = options.maxLogEntries ?? 5000;
   const heartbeatMs = options.heartbeatMs ?? 25_000;
 
-  // In-memory replay ring (bounded) + monotonic counter. Reloaded from the log
-  // tail on start so replay survives a Sentinel restart.
+  // In-memory replay ring (bounded) + monotonic counter. Holds ONLY durable
+  // events. Reloaded from the log tail on start so replay survives a restart.
   const buffer: SseEvent[] = [];
   let counter = 0;
+  // Live count of lines in the durable log — drives the pruning backstop.
+  let logEntryCount = 0;
   const subscribers = new Set<Subscriber>();
 
   let server: Server | undefined;
@@ -120,10 +174,27 @@ export function sseDeliver(sentinel: Sentinel, options: SseDeliverOptions): void
     if (buffer.length > bufferSize) buffer.shift();
   };
 
-  /** Append one event to the durable log, serialized. Errors logged, not thrown. */
+  /** Append one durable event to the log, serialized. Errors logged, not thrown. */
   const persist = (event: SseEvent): void => {
     writeChain = writeChain
       .then(() => appendFile(logPath, JSON.stringify(event) + '\n'))
+      .then(() => {
+        logEntryCount += 1;
+        // Pruning backstop: once the log overruns the cap, rewrite it to the
+        // current replay buffer (everything still replayable) and drop the rest.
+        // Bounds the durable log regardless of message volume or uptime.
+        if (maxLogEntries > 0 && logEntryCount > maxLogEntries) {
+          const snapshot = buffer.map((e) => JSON.stringify(e)).join('\n');
+          return writeFile(logPath, snapshot ? snapshot + '\n' : '').then(() => {
+            logEntryCount = buffer.length;
+            sentinel.logger.info(
+              { logPath, kept: buffer.length, cap: maxLogEntries },
+              'sse-deliver: durable log pruned to replay buffer'
+            );
+          });
+        }
+        return undefined;
+      })
       .catch((err) => sentinel.logger.error({ err, logPath }, 'sse-deliver: log append failed'));
   };
 
@@ -136,16 +207,22 @@ export function sseDeliver(sentinel: Sentinel, options: SseDeliverOptions): void
       return; // no prior log — fresh start
     }
     const lines = raw.split('\n').filter(Boolean);
+    let durableLines = 0;
     for (const line of lines) {
       try {
         const event = JSON.parse(line) as SseEvent;
+        // Defensively drop any legacy ephemeral telemetry a pre-refactor log may
+        // hold — it must never be replayed (and shouldn't count toward the cap).
+        if (!durableTopic(event.topic)) continue;
         if (typeof event.id === 'number' && event.id > counter) counter = event.id;
         pushToBuffer(event);
+        durableLines += 1;
       } catch {
         // skip a torn/partial trailing line
       }
     }
-    if (lines.length > 0) {
+    logEntryCount = durableLines;
+    if (durableLines > 0) {
       sentinel.logger.info(
         { restored: buffer.length, nextId: counter + 1 },
         'sse-deliver: replay buffer restored from log'
@@ -154,23 +231,37 @@ export function sseDeliver(sentinel: Sentinel, options: SseDeliverOptions): void
   };
 
   /**
-   * Publish one matching Signal to the bus subscribers + the durable log.
-   * Synchronous through counter bump, buffer push, and fan-out — Node's
-   * single-threaded model means no live event can slip between a connecting
-   * client's replay snapshot and its live subscription (see handleSse).
+   * Publish one matching Signal to the bus subscribers (+ the durable log, for
+   * durable topics only). Synchronous through counter bump, buffer push, and
+   * fan-out — Node's single-threaded model means no live event can slip between
+   * a connecting client's replay snapshot and its live subscription (see
+   * handleSse).
+   *
+   * Durable topic  → assign monotonic id, buffer for replay, persist to log, fan
+   *                  out. Survives reconnect via Last-Event-ID.
+   * Ephemeral topic→ fan out LIVE only (no id, no buffer, no log, no replay).
+   *                  Current state still lives in snapshot-store, not here.
    */
   const publish = (signal: Signal): void => {
     const topic = topicOf(signal);
-    counter += 1;
-    const event: SseEvent = {
-      id: counter,
+    const base = {
       topic,
       signalId: signal.id,
       ts: new Date().toISOString(),
       data: JSON.stringify(signal),
     };
-    pushToBuffer(event);
-    persist(event);
+
+    let event: SseEvent;
+    if (durableTopic(topic)) {
+      counter += 1;
+      event = { id: counter, ...base };
+      pushToBuffer(event);
+      persist(event);
+    } else {
+      // Ephemeral telemetry: live-only frame, deliberately id-less.
+      event = base;
+    }
+
     for (const sub of subscribers) {
       if (topicMatches(sub.topics, topic)) sub.write(event);
     }
@@ -218,7 +309,9 @@ export function sseDeliver(sentinel: Sentinel, options: SseDeliverOptions): void
     // Replay snapshot + live registration in one synchronous block: any event
     // published after this returns is delivered live; anything <= the snapshot
     // is in the replay. No gap, no duplicate.
-    const replay = buffer.filter((e) => e.id > replayFrom && topicMatches(topics, e.topic));
+    // Buffer only ever holds durable events, so e.id is always defined here;
+    // (?? 0) just satisfies the optional-id type.
+    const replay = buffer.filter((e) => (e.id ?? 0) > replayFrom && topicMatches(topics, e.topic));
     for (const event of replay) sub.write(event);
     subscribers.add(sub);
 
