@@ -14,6 +14,7 @@ import { hostname } from 'node:os';
 import { pollCommand } from './collect/poll-command.js';
 import { snapshotStore } from './storage/snapshot-store.js';
 import { sseDeliver } from './deliver/sse-deliver.js';
+import { apiBinding } from './access/bindings/api-binding.js';
 
 const sentinel = createSentinel({
   name: 'switchboard',
@@ -46,9 +47,17 @@ sseDeliver(sentinel, {
   logPath: 'snapshots/sse-eventlog.jsonl',
 });
 
-// Access: the MCP binding (src/access/bindings/mcp-binding.ts) is a STANDALONE
-// stdio entry point spawned by an agent's MCP client — it reads the snapshot
-// above and is intentionally NOT wired here (stdio would collide with logging).
+// Access (Command side): inbound HTTP ingest. POST a job ticket to /jobs and it
+// is emitted on the bus as a `job.queued` Signal — which sse-deliver then fans
+// out to any SSE client subscribed with `?subscribe=job.queued`. Distinct port
+// from sse-deliver (override via INGEST_PORT); host-local by default.
+apiBinding(sentinel, {
+  port: Number(process.env['INGEST_PORT'] ?? 5100),
+});
+
+// Access (Query side): the MCP binding (src/access/bindings/mcp-binding.ts) is a
+// STANDALONE stdio entry point spawned by an agent's MCP client — it reads the
+// snapshot above and is intentionally NOT wired here (stdio collides w/ logging).
 
 // Default subscriber: log every Signal to the Pino logger.
 sentinel.on((signal) => {

@@ -15,7 +15,9 @@
   },
   "dependencies": {
     "@appydave/appysentinel-core": "^0.2.0",
-    "@modelcontextprotocol/sdk": "^1.0.0"
+    "@hono/node-server": "^1.19.14",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "hono": "^4.12.23"
   },
   "devDependencies": {
     "@appydave/appysentinel-config": "^0.1.0",

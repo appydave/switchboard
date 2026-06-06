@@ -11,7 +11,7 @@
   "recipes": {
     "input": ["poll-command"],
     "storage": ["snapshot-store"],
-    "interface": ["mcp-binding"],
+    "interface": ["mcp-binding", "api-binding"],
     "transport": ["sse-deliver"],
     "enrichment": [],
     "runtime": ["register-as-launchd"],
