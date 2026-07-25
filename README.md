@@ -1,6 +1,6 @@
 # switchboard
 
-A per-machine, observer-only telemetry collector built on [AppySentinel](https://github.com/appydave/appysentinal).
+A per-machine, observer-only telemetry collector built on [AppySentinel](https://github.com/appydave/appysentinel).
 
 This project was scaffolded by `create-appysentinel`. It currently contains only the **walking skeleton** — `createSentinel()` is wired up, but no collectors, storage, interface, or transport are configured yet.
 
